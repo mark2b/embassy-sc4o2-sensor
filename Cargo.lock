@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "embassy-sc4o2-sensor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "circular-buffer",
  "cortex-m-rt",
