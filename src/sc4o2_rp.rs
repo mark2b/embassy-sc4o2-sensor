@@ -1,13 +1,15 @@
-use crate::{SC4O2Error, SC4O2Response};
 use circular_buffer::CircularBuffer;
-use embassy_rp::uart::Error::{Overrun};
+use embassy_rp::uart;
+use embassy_rp::uart::Error::Overrun;
 use embassy_rp::uart::{Async, Uart};
-use embassy_rp::{uart};
-use embassy_time::{Duration};
+use embassy_time::Duration;
 
+use crate::{SC4O2Error, SC4O2Response};
 
 const PAYLOAD_SIZE: usize = 9;
 const BUFFER_SIZE: usize = PAYLOAD_SIZE * 3;
+const FRAME_START: u8 = 0xFF;
+const FRAME_COMMAND: u8 = 0x86;
 
 pub struct SC4O2Sensor<'a> {
     uart: Uart<'a, Async>,
@@ -16,7 +18,6 @@ pub struct SC4O2Sensor<'a> {
     last_read_time: Option<embassy_time::Instant>,
     __marker: core::marker::PhantomData<&'a ()>,
 }
-
 
 impl<'a> SC4O2Sensor<'a> {
     pub fn new(uart: Uart<'a, Async>) -> Self {
@@ -41,12 +42,10 @@ impl<'a> SC4O2Sensor<'a> {
         if let Some(last_read_time) = self.last_read_time {
             if now.duration_since(last_read_time) >= MIN_READ_TIMEOUT {
                 self.read_internal().await
+            } else if let Some(response) = &self.last_response {
+                Ok(response.clone())
             } else {
-                if let Some(response) = &self.last_response {
-                    Ok(response.clone())
-                } else {
-                    Err(SC4O2Error::NoData)
-                }
+                Err(SC4O2Error::NoData)
             }
         } else {
             self.last_read_time = Some(now);
@@ -70,55 +69,69 @@ impl<'a> SC4O2Sensor<'a> {
                         continue;
                     }
                     _ => {
-                        log::info!("UART other error: {:?}", e);
+                        log::info!("UART other error: {e:?}");
                         break;
                     }
                 },
             }
         }
 
-        let mut ready_buf = [0u8; PAYLOAD_SIZE];
-        let mut index = 0;
-        let mut buffer_index = 0;
-        while let Some(byte) = self.circular_buffer.nth_front(buffer_index) {
-            buffer_index += 1;
-            let byte = *byte;
-            if byte == 0xFF && index == 0 {
-                ready_buf[index] = byte;
-                index += 1;
+        let frame = self.next_frame()?;
+        let o2 = u16::from_be_bytes([frame[2], frame[3]]) as f32 / 10.0;
+        let response = SC4O2Response { o2 };
+        self.last_response = Some(response.clone());
+        self.last_read_time = Some(embassy_time::Instant::now());
+        Ok(response)
+    }
+
+    fn next_frame(&mut self) -> Result<[u8; PAYLOAD_SIZE], SC4O2Error> {
+        let mut saw_checksum_error = false;
+
+        while self.circular_buffer.len() >= PAYLOAD_SIZE {
+            if self.circular_buffer.nth_front(0).copied() != Some(FRAME_START) {
+                self.circular_buffer.pop_front();
                 continue;
             }
-            else if byte == 0x86 && index == 1 {
-                ready_buf[index] = byte;
-                index += 1;
+
+            if self.circular_buffer.nth_front(1).copied() != Some(FRAME_COMMAND) {
+                self.circular_buffer.pop_front();
                 continue;
-            } else if index > 1 {
-                ready_buf[index] = byte;
-                index += 1;
-                if index >= PAYLOAD_SIZE {
-                    break;
+            }
+
+            let mut frame = [0u8; PAYLOAD_SIZE];
+            for (index, byte) in frame.iter_mut().enumerate() {
+                *byte = self.circular_buffer.nth_front(index).copied().unwrap();
+            }
+
+            let checksum = Self::checksum(&frame);
+            if checksum == frame[8] {
+                for _ in 0..PAYLOAD_SIZE {
+                    self.circular_buffer.pop_front();
                 }
+
+                return Ok(frame);
             }
+
+            log::error!("Checksum mismatch: expected {}, got {}", checksum, frame[8]);
+            saw_checksum_error = true;
+            self.circular_buffer.pop_front();
         }
 
-        let checksum = !(ready_buf[0] as u16
-            + ready_buf[1] as u16
-            + ready_buf[2] as u16
-            + ready_buf[3] as u16
-            + ready_buf[4] as u16
-            + ready_buf[5] as u16
-            + ready_buf[6] as u16
-            + ready_buf[7] as u16) as u8;
-
-        if checksum == ready_buf[8] {
-            let o2 = u16::from_be_bytes([ready_buf[2], ready_buf[3]]) as f32 / 10.0;
-            let response = SC4O2Response { o2 };
-            self.last_response = Some(response.clone());
-            self.last_read_time = Some(embassy_time::Instant::now());
-            Ok(response)
-        } else {
-            log::error!("Checksum mismatch: expected {}, got {}", checksum, ready_buf[7]);
+        if saw_checksum_error {
             Err(SC4O2Error::ChecksumError)
+        } else {
+            Err(SC4O2Error::NoData)
         }
+    }
+
+    fn checksum(frame: &[u8; PAYLOAD_SIZE]) -> u8 {
+        !(frame[0] as u16
+            + frame[1] as u16
+            + frame[2] as u16
+            + frame[3] as u16
+            + frame[4] as u16
+            + frame[5] as u16
+            + frame[6] as u16
+            + frame[7] as u16) as u8
     }
 }

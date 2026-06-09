@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
 
-use defmt::{error, info};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
-use embassy_rp::peripherals::{I2C0, UART0, USB};
-use embassy_rp::{bind_interrupts, i2c, uart};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, I2C0, UART0, USB};
+use embassy_rp::{bind_interrupts, dma, i2c, uart};
 use embassy_rp::uart::Uart;
 use embassy_rp::usb::Driver;
 // use embassy_sc4o2_sensor::{SC4O2Error, SC4O2Sensor};
@@ -14,6 +13,7 @@ use panic_probe as _;
 use embassy_sc4o2_sensor::{SC4O2Error, SC4O2Sensor};
 
 bind_interrupts!(struct Irqs {
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
     UART0_IRQ => uart::InterruptHandler<UART0>;
     USBCTRL_IRQ =>  embassy_rp::usb::InterruptHandler<USB>;
 });
@@ -23,7 +23,7 @@ async fn main(spawner: Spawner) -> ! {
     let p = embassy_rp::init(Default::default());
 
     let driver = Driver::new(p.USB, Irqs);
-    spawner.spawn(logger_task(driver)).unwrap();
+    spawner.spawn(logger_task(driver).unwrap());
 
 
     let mut config = uart::Config::default();
